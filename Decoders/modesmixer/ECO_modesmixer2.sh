@@ -1,0 +1,2 @@
+#!/bin/bash
+./modesmixer2 --outConnect msg:127.0.0.1:1488 --log-level 4 --web 8080 --location 55.87249392:37.51276374 --localtime --filter-nocountry  --add-points 55.4091:37.8901:[domodedovo] 55.971:37.4086:[sheremetyevo] 55.59:37.26:[vnukovo] --metric
