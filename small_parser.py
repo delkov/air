@@ -4,13 +4,13 @@ import timeit
 import sys
 import shutil
 import math
-from datetime import timedelta
-import udatetime
+from datetime import datetime, timedelta
+# import udatetime
 import time
 import os
 import glob
 from collections import defaultdict
-from line_profiler import LineProfiler
+# from line_profiler import LineProfiler
 import psycopg2
 
  # change to 32637 for MOSCOW, 32652 seoul
@@ -21,6 +21,9 @@ import psycopg2
 track_memory=300 # how many time keep the same track, after this time, this icao - is already new track
 param_memory=[3600] + [30]*7 # 30 sec we remember param, if more, than -1 -, 3600 for callsign
 type_flight_detection_time = 30 # decision about take-off, first we get GND, if after this time we got message which are not MSG2 -> take off.
+max_altitude_type_detection=500 # in meters. from which 
+min_altitude_type_detection=100 # in meters
+
 
 track_memory=timedelta(seconds=track_memory) 
 type_flight_detection_time = timedelta(seconds=type_flight_detection_time) 
@@ -33,46 +36,35 @@ param_memory[5]=timedelta(seconds=param_memory[5])
 param_memory[6]=timedelta(seconds=param_memory[6])
 param_memory[7]=timedelta(seconds=param_memory[7])
 
-# def do_profile(follow=None):
-#     if not follow:
-#         follow = []
-#     def inner(func):
-#         def profiled_func(*args, **kwargs):
-#             try:
-#                 profiler = LineProfiler()
-#                 profiler.add_function(func)
-#                 for f in follow:
-#                     profiler.add_function(f)
-#                 profiler.enable_by_count()
-#                 return func(*args, **kwargs)
-#             finally:
-#                 profiler.print_stats()
-#         return profiled_func
-#     return inner
-# # def get_number():
-# #     for i in range(10000000):
-# #         yield i
-
-
-# @do_profile(follow=None)
 def main():
-	def upd_msg_2(icao_query):
-		if altitude_py is not None: # to make possible comparisom below, if None - error will be
-			if first_gnd_angle is None: # just first is ok [+ code: or first_gnd_angle==None]: # FIRST GND MSG
-				print('FIRST GND MSG')
-				if altitude_py > 100 and angle_py is not None:  # means REALLY fly not rolling -> altitude requirements  # NOT ROLLING SHOULD BE!!
-					SQL='''
-					UPDATE eco.aircraft_tracks SET (first_gnd_angle, last_gnd_angle) = (%s, %s) WHERE track=(%s);
-					'''	
-					data=(angle_py, angle_py, last_track)
-					icao_query.append(cursor.mogrify(SQL, data).decode('utf-8'))
-			else: # NOT FIRST GND MSG
-				print('NOT FIRST GND MSG')
+
+	def gnd_detection(icao_query, param_from_msg):
+		print('try GND detect')
+		successful=None
+		altitude_py=param_from_msg[3]
+		angle_py=param_from_msg[5]
+		vertical_speed_py=param_from_msg[8]
+		if altitude_py is not None and (altitude_py < max_altitude_type_detection) and (altitude_py > min_altitude_type_detection):
+			if vertical_speed_py is not None and angle_py is not None: # from MSG 4 they have to be not NULL at same time
+				successful=True
+				if vertical_speed_py > 0:
+					type_of_flight=True # True means TAKE-OFF (first letter is t, so..)
+					print('TAKING-OFF, angle is: ', angle_py)
+				else:
+					type_of_flight=False # False means LANDING
+					print('LANDING, angle is: ', angle_py)
+
 				SQL='''
-				UPDATE eco.aircraft_tracks SET (last_gnd_angle) = (%s) WHERE track=(%s);
+					UPDATE eco.aircraft_tracks SET (type_of_flight, vpp_angle) = (%s, %s) WHERE track=(%s);
 				'''
-				data=(angle_py, last_track)
+				data=(type_of_flight, angle_py, last_track)
 				icao_query.append(cursor.mogrify(SQL, data).decode('utf-8'))
+
+		return successful
+
+
+
+
 
 	def upd_icao_query(icao_query, param_from_msg):
 		SQL = '''
@@ -87,23 +79,19 @@ def main():
 		connect = psycopg2.connect(database='eco_db', user='postgres', host='localhost', password='z5UHwrg8', port=5432)
 		cursor = connect.cursor()
 	except psycopg2.OperationalError as e:
-		print("Can\'t connect to db" + '\n' +str(e)+udatetime.now_to_string())
+		print("Can\'t connect to db" + '\n' +str(e)+str(datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
 
 	# CHANGE DIR 
 	os.chdir("/home/delkov/Documents/air/sbs_store")
 	destination_path="/home/delkov/Documents/air/sbs_store/smth_wrong" # if here -> file is wrong
 	store_path="/home/delkov/Documents/air/sbs_store/smth_wrong/bd_was_dead" # if here -> db was bad
-	print('PROGRAM START WORKING..'+udatetime.now_to_string())
-
-	# new_counter=0
-	# old_counter=0
-	# msg_6_8=0
+	print('PROGRAM START WORKING..'+str(datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
 
 	Main_loop=True;
 	while Main_loop:
 		start = time.time()
 		
-		txt_list=sorted(glob.glob('sbs.2*'), key = lambda file: os.path.getctime(file)) # find all txt in the folders
+		txt_list=sorted(glob.glob('*sorted.txt'), key = lambda file: os.path.getctime(file)) # find all txt in the folders
 		for txt_temp in txt_list:
 			total_query_for_distance=[]
 			icao_query=[]
@@ -115,109 +103,55 @@ def main():
 				all_strings=txt.readlines()
 
 			bad_string_counter=False
-			## SEPARATE ALL LINES BY ICAO ##
+			# ## SEPARATE ALL LINES BY ICAO ## ACTUALLY THEY ALREADY COME SORTED WAY..
 			for string in all_strings:
-				# print(txt_temp)
 				string=string.split(',')
-				if len(string) == 22:
-					icao_list[string[4]].append(string) #appending the lines by icao
-				else:
-					bad_string_counter = not bad_string_counter
-					if bad_string_counter:
-						prev_string=string # first bad line -> second also bad
-						# print('1st', prev_string)
-					else:
-						# print('2nd', string)
-						string=prev_string[:-1]+string
-						# print(string)
-						icao_list[string[4]].append(string) #appending the lines by icao	
-
+				icao_list[string[0]].append(string) #appending the lines by icao
 
 			## LOOP FOR CURRENT ICAO ---- MAIN LOOP ----------------------------------------------------------
 			for temp_icao in icao_list:
 				first_time_icao=True
-
+				# print('TEMP ICAO', temp_icao)
 				## LOOP FOR ALL STRING FOR THIS ICAO
 				for string in icao_list[temp_icao]:
 					# print(string)
 					## PARSING PARAMS, if empty -> None, this None will be replaced by previous param below.
-					try:
-						MSG_NUM, icao_py, time_py= int(string[1]), string[4], udatetime.from_string(string[6].replace('/','-')+'T'+string[7]).replace(tzinfo=None) 
-					except:
-						print(string)
-						continue
+					# STRING: ICAO(0), DATE(1), TIME(2), CALLSIGN(3), ALT(4), GS(5), TRK(6), LAT(7), LON(8), VR(9)  // 0-10
+					year,month,day=map(int,string[1].split('/'))
+					str_time=string[2].split('.')[0] 
+					hour, minute, second = map(int,str_time.split(":"))
+
+					icao_py, time_py= string[0], datetime(year,day,month,hour,minute,second)					
+					callsign_py, altitude_py, speed_py, angle_py, latitude_py, longitude_py, vertical_speed_py =  string[3],string[4],string[5],string[6],string[7],string[8],string[9] # since in MSG  not all are presented -> default
 					
-					if MSG_NUM in [6,8]:
-						# msg_6_8+=1
-						continue
+					if not callsign_py:
+						callsign_py=None
+					if not altitude_py:
+						altitude_py=None
+					else:
+						altitude_py=float(altitude_py)*0.3048 ## transform to meter from ft to calculate distance rigth way. From gps -- postgis calculating meter -> here also meter.
+					if not speed_py:
+						speed_py=None
+					else:
+						speed_py=float(speed_py)*1.852 ## transform to km/h from knots
+					if not angle_py:
+						angle_py=None
+					if not latitude_py:
+						latitude_py=None
+					if not longitude_py:
+						longitude_py=None
+					if not vertical_speed_py:
+						vertical_speed_py=None
+					else:
+						vertical_speed_py=float(int(vertical_speed_py))*0.051 ## meter per second
 
-					elif MSG_NUM==1:
-						callsign_py, altitude_py, speed_py, angle_py, latitude_py, longitude_py, vertical_speed_py =  string[10],None,None,None,None,None,None # since in MSG  not all are presented -> default
-						if not callsign_py:
-							callsign_py=None
-					
-					elif MSG_NUM==2:
-						callsign_py, altitude_py, speed_py, angle_py, latitude_py, longitude_py, vertical_speed_py =  None,string[11],string[12],string[13],string[14],string[15],None # since in MSG  not all are presented -> default
-						if not altitude_py:
-							altitude_py=None
-						else:
-							altitude_py=float(altitude_py)*0.3048 ## transform to meter from ft to calculate distance rigth way. From gps -- postgis calculating meter -> here also meter.
-						
-						if not speed_py:
-							speed_py=None
-						else:
-							speed_py=float(speed_py)*1.852 ## transform to km/h from knots
-						
-						if not angle_py:
-							angle_py=None
-						
-						if not latitude_py:
-							latitude_py=None
-						
-						if not longitude_py:
-							longitude_py=None
 
-					elif MSG_NUM==3:
-						callsign_py, altitude_py, speed_py, angle_py, latitude_py, longitude_py, vertical_speed_py =  None,string[11],None,None,string[14],string[15],None # since in MSG  not all are presented -> default
-						if not altitude_py:
-							altitude_py=None
-						else:
-							altitude_py=float(altitude_py)*0.3048 ## transform to meter from ft to calculate distance rigth way. From gps -- postgis calculating meter -> here also meter.
-
-						if not latitude_py:
-							latitude_py=None
-						
-						if not longitude_py:
-							longitude_py=None
-
-					elif MSG_NUM==4:
-						callsign_py, altitude_py, speed_py, angle_py, latitude_py, longitude_py, vertical_speed_py =  None,None,string[12],string[13],None,None,string[16] # since in MSG  not all are presented -> default
-						if not speed_py:
-							speed_py=None
-						else:
-							speed_py=float(speed_py)*1.852 ## transform to km/h from knots
-
-						if not angle_py:
-							angle_py=None
-						
-						if not vertical_speed_py:
-							vertical_speed_py=None
-						else:
-							vertical_speed_py=float(vertical_speed_py)*0.051 ## meter per second
-
-					elif MSG_NUM in [5,7]:
-						callsign_py, altitude_py, speed_py, angle_py, latitude_py, longitude_py, vertical_speed_py =  None,string[11],None,None,None,None,None # since in MSG  not all are presented -> default
-						if not altitude_py:
-							altitude_py=None
-						else:
-							altitude_py=float(altitude_py)*0.3048 ## transform to meter from ft to calculate distance rigth way. From gps -- postgis calculating meter -> here also meter.
-			
 					if first_time_icao:
 						# print('icao FIRST time')
 						first_time_icao=False
 						# TRY TO FIND CLOSEST TRACK FOR THIS ICAO AND TIME!! 
 						SQL="""
-						SELECT track,first_time,	last_time,callsign_last_time,altitude_last_time,speed_angle_last_time,coordinate_last_time,vert_speed_last_time,	gnd_last_time,type_of_flight,first_gnd_angle  from eco.aircraft_tracks where icao=(%s) ORDER BY case when last_time > (%s) then last_time - (%s) else (%s) - last_time end limit 1;
+						SELECT track,first_time,	last_time,callsign_last_time,altitude_last_time,speed_angle_last_time,coordinate_last_time,vert_speed_last_time,	type_of_flight  from eco.aircraft_tracks where icao=(%s) ORDER BY case when last_time > (%s) then last_time - (%s) else (%s) - last_time end limit 1;
 						"""
 						data=(icao_py,time_py,time_py,time_py)
 						cursor.execute(SQL, data)
@@ -228,15 +162,12 @@ def main():
 						# TRACK IS EXIST AND NOT TOO OLD, FROM BOTH SIDE OF TIME.. --> we should write from old to new ot new to old
 						if time_answer and (time_py-time_answer[2] <= track_memory and time_answer[2] - time_py <= track_memory):
 							# print('track OLD')
-							last_time_param=[time_answer[3],time_answer[4],time_answer[5],time_answer[5],time_answer[6],time_answer[6],time_answer[7], time_answer[8]]
+							last_time_param=[time_answer[3],time_answer[4],time_answer[5],time_answer[5],time_answer[6],time_answer[6],time_answer[7]] # only params last time
 							last_track=time_answer[0]
 
 							## FOR GROUND 
-							type_of_flight=time_answer[9]
-							first_gnd_angle=time_answer[10]
-							# we detect only take-off, other flight means landing. if no last_msg_2 -> no GND signal -> nor landing neither take-off 
-							# True means TAKE-OFF; if there is last_gnd, but there is no type_of_flight -> LANDNG;if Nor last_gns -> JUST FLYING throw.
-							# if no MSG2-> analyze altitude post-factum
+							type_of_flight=time_answer[8]
+							print('type of flight', type_of_flight)
 
 							# TAKE PREVIOUS PARAM
 							SQL="""
@@ -246,7 +177,7 @@ def main():
 							cursor.execute(SQL, data)
 							previous_param= cursor.fetchall()[0]
 
-							# UPDATE PARAM FROM PREVIOUS MSG, we make list to chek it in the loop -- more easy, compact
+							# UPDATE PARAM FROM PREVIOUS MSG, we make list to check it in the loop -- more easy, compact
 							param_from_msg=[time_py, last_track, callsign_py,altitude_py,speed_py,angle_py,latitude_py,longitude_py,vertical_speed_py]
 							for x in range(7):
 								if param_from_msg[x+2] == None:
@@ -256,30 +187,18 @@ def main():
 									last_time_param[x]=time_py
 
 							# FOR GROUND
-							if MSG_NUM==2: # for gnd_last_time
-								last_time_param[7]=time_py
-								upd_msg_2(icao_query) # try to write first or last angle
-							# detect type of flight
-							elif not type_of_flight: # we don't know type of flight yet
-								if last_time_param[7] and (time_py - last_time_param[7] > type_flight_detection_time): # means we got firstly GND, and after detection_time another one, but not from ground -> it's not at the ground anymore.
-									print('Detect TAKE-OFF at time MSG2 TIME', time_py)
-									type_of_flight=True 
-									SQL = '''
-									UPDATE eco.aircraft_tracks SET (type_of_flight) = (%s) WHERE track=(%s);
-									'''
-									data =  (type_of_flight, last_track) 
-									icao_query.append(cursor.mogrify(SQL, data).decode('utf-8'))
+							if type_of_flight is None:
+								type_of_flight=gnd_detection(icao_query,param_from_msg)
+
 									
 							## NOW WE HAVE UPDATED PARAMS in param_from_msg
 							upd_icao_query(icao_query, param_from_msg)
 
 
-							# old_counter+=1
 						else: ## TRACK IS TOO OLD OR DOESNT EXIST
 							# print('track NEW')
-							# new_counter+=1
 
-							type_of_flight, first_gnd_angle=None, None
+							type_of_flight=None
 							# !!!!!!!!!!!!!!!!!!! TO SASHA ADD icao info if not exist -- alone script to serf BD!!!!!!!!11
 							SQL = '''
 							INSERT INTO eco.aircrafts (icao) VALUES (%s) ON CONFLICT (icao) DO NOTHING;
@@ -291,15 +210,15 @@ def main():
 
 							## write_last_time for next iteration
 							param_from_msg=[time_py,last_track, 	callsign_py,altitude_py,speed_py,angle_py,latitude_py,longitude_py,vertical_speed_py]
-							last_time_param=[None]*8
+							last_time_param=[None]*7
 							
 							for x in range(7):
 								if param_from_msg[x+2] is not None:
 									last_time_param[x]=time_py
 							
-							if MSG_NUM==2: # for gnd_last_time
-								last_time_param[7]=time_py
-								upd_msg_2(icao_query)
+							# FOR GROUND
+							if type_of_flight is None:
+								type_of_flight=gnd_detection(icao_query,param_from_msg)
 
 							upd_icao_query(icao_query, param_from_msg)
 
@@ -307,7 +226,6 @@ def main():
 					# icao is not first time
 					else:
 						# print('icao NOT first time')
-						# old_counter+=1
 
 						# take this param from first-time-icao block
 						previous_param=param_from_msg[:]						
@@ -321,18 +239,9 @@ def main():
 								last_time_param[x]=time_py
 						
 
-						if MSG_NUM==2: # for gnd_last_time
-							last_time_param[7]=time_py
-							upd_msg_2(icao_query) # try to write first or last angle
-						elif not type_of_flight: # we don't know type of flight yet
-							if last_time_param[7] and (time_py - last_time_param[7] > type_flight_detection_time):# and MSG_NUM !=2): -- automatically since ELEIF before # means we got firstly GND, and after detection_time another one, but not from ground -> it's not at the ground anymore.
-								print('Detect TAKE-OFF at time MSG2 TIME', time_py)
-								type_of_flight=True 
-								SQL = '''
-								UPDATE eco.aircraft_tracks SET (type_of_flight) = (%s) WHERE track=(%s);
-								'''
-								data =  (type_of_flight, last_track) 
-								icao_query.append(cursor.mogrify(SQL, data).decode('utf-8'))
+						# FOR GROUND
+						if type_of_flight is None:
+							type_of_flight= gnd_detection(icao_query,param_from_msg)
 
 						upd_icao_query(icao_query, param_from_msg) # last-time will be updated at the end
 
@@ -340,11 +249,11 @@ def main():
 				#-------------- END LOOP FOR CURRENT ICAO --------------
 				# UPDATE LAST-TIME FOR ALL PARAMS AT THE END FOR CURRENT ICAO & CALLSIGN (it keeps 1 hr, so it's fine)
 				SQL='''
-				UPDATE eco.aircraft_tracks SET (last_time, callsign_last_time, altitude_last_time, speed_angle_last_time, coordinate_last_time, vert_speed_last_time, gnd_last_time) = (%s,%s,%s,%s,%s,%s,%s) WHERE track=(%s);
+				UPDATE eco.aircraft_tracks SET (last_time, callsign_last_time, altitude_last_time, speed_angle_last_time, coordinate_last_time, vert_speed_last_time) = (%s,%s,%s,%s,%s,%s) WHERE track=(%s);
 				UPDATE eco.tracks SET (callsign) = (%s) WHERE track=(%s);
 				'''
 				try:
-					data=(time_py, last_time_param[0],last_time_param[1],last_time_param[2],last_time_param[4],last_time_param[6],last_time_param[7],last_track,	param_from_msg[2],last_track);
+					data=(time_py, last_time_param[0],last_time_param[1],last_time_param[2],last_time_param[4],last_time_param[6],last_track,	param_from_msg[2],last_track);
 				except:
 					print('last_time_problem..', last_time_param)
 
@@ -379,9 +288,7 @@ def main():
 
 		end = time.time()
 		print('TOTAL TIME', end-start)
-		# print('NEW',new_counter,' OLD', old_counter, 'MSG_6_8', msg_6_8, 'TOTAL: ', new_counter+old_counter+msg_6_8)
 		Main_loop=False
-		# os.chdir("/home/delkov/Documents/air")
 		# time.sleep(10)
 
 	## CLOSE BD AFTER EXIT
